@@ -2,29 +2,426 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Response-time report</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SLA Response-Time Report Dashboard</title>
+  <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <h1>Response-time report</h1>
-  <form id="f">
-    <label>From <input type="date" name="from" required></label>
-    <label>To <input type="date" name="to" required></label>
-    <button type="submit">Run report</button>
-  </form>
-  <p id="status"></p>
-  <table id="report" border="1">
-    <thead></thead>
-    <tbody></tbody>
-  </table>
-  <script>
-    document.getElementById("f").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const params = new URLSearchParams(new FormData(e.target));
-      const res = await fetch("/api/sla-report?" + params);
-      const data = await res.json();
-      // TODO: render `data` into the table.
-      document.getElementById("status").textContent = res.status + " " + JSON.stringify(data);
-    });
-  </script>
+  <!-- Top Navigation -->
+  <header class="top-nav">
+    <div class="top-nav-inner">
+      <div class="brand">
+        <div class="brand-icon">SLA</div>
+        <div>
+          <div class="brand-title">Response-Time Report Dashboard</div>
+          <div class="brand-subtitle">Site-local business hours &amp; SLA compliance analytics</div>
+        </div>
+      </div>
+      <div class="system-pills">
+        <span id="health-pill" class="status-pill" title="GET /health">
+          <span class="status-dot"></span>
+          <span id="health-text">Health: checking...</span>
+        </span>
+        <span id="ready-pill" class="status-pill" title="GET /ready">
+          <span class="status-dot"></span>
+          <span id="ready-text">Ready: checking...</span>
+        </span>
+        <button type="button" id="refresh-status-btn" class="btn btn-ghost" title="Re-check /health and /ready">
+          Check Status
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- Mode Switcher & Rules Quick Reference -->
+    <div class="mode-tabs">
+      <div class="tab-group" role="tablist">
+        <button type="button" class="tab-btn active" data-tab="report-view">
+          SLA Report (Level 1–3)
+        </button>
+        <button type="button" class="tab-btn" data-tab="browse-view">
+          Browse Requests API (Level 4)
+        </button>
+      </div>
+      <div class="presets-group">
+        <button type="button" id="toggle-json-btn" class="btn btn-ghost">
+          { } Raw JSON
+        </button>
+        <button type="button" id="export-csv-btn" class="btn btn-ghost" disabled>
+          Export CSV
+        </button>
+      </div>
+    </div>
+
+    <!-- Collapsible SLA Rules Summary -->
+    <details class="rules-box">
+      <summary>
+        <span>SLA Calculation Rules Summary (from docs/rules.md)</span>
+        <span style="font-size: 0.75rem; color: var(--text-muted); font-weight: 500;">Click to expand / collapse</span>
+      </summary>
+      <div class="rules-grid">
+        <div class="rule-item">
+          <strong>1. Eligible Requests</strong>
+          Site-local <code>created_at</code> within <code>from..to</code> inclusive. Excludes <code>canceled</code>, <code>deleted_at != null</code>, and <code>merged_into_id != null</code>.
+        </div>
+        <div class="rule-item">
+          <strong>2 &amp; 3. Undone Events &amp; First Response</strong>
+          Events with <code>reverts_id</code> and their target are ignored. Earliest remaining event with <code>status: "processing"</code> and non-null <code>actor_id</code> sets the responder.
+        </div>
+        <div class="rule-item">
+          <strong>4 &amp; 5. Business Minutes &amp; SLA Target</strong>
+          Site business hours (excluding site holidays), summed in seconds and floored to minutes. Targets: <strong>High ≤ 60m</strong>, <strong>Medium ≤ 240m</strong>, <strong>Low / null ≤ 480m</strong>.
+        </div>
+        <div class="rule-item">
+          <strong>6 &amp; 7. Completed Late &amp; Nulls</strong>
+          Last <code>complete</code> event strictly after latest <code>due_at</code> (site-local wall-clock). Unresponded or uncompleted requests yield <code>null</code> fields.
+        </div>
+      </div>
+    </details>
+
+    <!-- Status / Alert Banner -->
+    <div id="status-banner" class="status-banner hidden">
+      <span id="status"></span>
+      <span id="latency-badge" class="badge badge-info hidden"></span>
+    </div>
+
+    <!-- Raw JSON Drawer -->
+    <section id="json-drawer" class="card hidden">
+      <div class="card-header">
+        <div>
+          <div class="card-title">Raw API Response Payload</div>
+          <div class="card-subtitle" id="json-endpoint-label">GET /api/sla-report</div>
+        </div>
+        <button type="button" id="copy-json-btn" class="btn btn-ghost">Copy JSON</button>
+      </div>
+      <div class="card-body">
+        <pre id="json-output" class="json-viewer">No report loaded yet.</pre>
+      </div>
+    </section>
+
+    <!-- ==================== TAB 1: SLA REPORT VIEW ==================== -->
+    <div id="report-view" class="tab-panel">
+      <!-- Date Range Form Card -->
+      <section class="card" style="margin-bottom: 1.25rem;">
+        <div class="card-body">
+          <form id="f" class="report-controls">
+            <div class="date-inputs">
+              <div class="field">
+                <label for="from-input">From (Site Local Date)</label>
+                <input type="date" id="from-input" name="from" value="2026-10-01" required>
+              </div>
+              <div class="field">
+                <label for="to-input">To (Site Local Date)</label>
+                <input type="date" id="to-input" name="to" value="2026-10-31" required>
+              </div>
+              <button type="submit" id="run-btn" class="btn btn-primary">
+                <span>Run Report</span>
+              </button>
+            </div>
+
+            <div class="presets-group">
+              <span class="presets-label">Quick ranges:</span>
+              <button type="button" class="btn btn-ghost preset-btn" data-from="2026-10-01" data-to="2026-10-31">
+                Oct 2026 (Full Month)
+              </button>
+              <button type="button" class="btn btn-ghost preset-btn" data-from="2026-10-12" data-to="2026-10-18">
+                12–18 Oct 2026
+              </button>
+              <button type="button" class="btn btn-ghost preset-btn" data-from="2026-05-01" data-to="2026-10-31">
+                May–Oct 2026 (6 Months)
+              </button>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <!-- KPI Summary Cards -->
+      <section class="kpi-grid" style="margin-bottom: 1.25rem;">
+        <div class="kpi-card">
+          <div class="kpi-label">Eligible Requests</div>
+          <div class="kpi-value" id="kpi-total-requests">—</div>
+          <div class="kpi-meta" id="kpi-date-range">Run a report to view metrics</div>
+        </div>
+
+        <div class="kpi-card">
+          <div class="kpi-label">Responded Requests</div>
+          <div class="kpi-value" id="kpi-responded">—</div>
+          <div class="kpi-meta" id="kpi-unresponded">— unresponded</div>
+          <div class="progress-track">
+            <div id="kpi-responded-bar" class="progress-fill" style="width: 0%"></div>
+          </div>
+        </div>
+
+        <div class="kpi-card">
+          <div class="kpi-label">Within SLA Target</div>
+          <div class="kpi-value" id="kpi-within-target">—</div>
+          <div class="kpi-meta" id="kpi-within-target-sub">Of responded requests</div>
+          <div class="progress-track">
+            <div id="kpi-target-bar" class="progress-fill success" style="width: 0%"></div>
+          </div>
+        </div>
+
+        <div class="kpi-card">
+          <div class="kpi-label">Completed Late</div>
+          <div class="kpi-value" id="kpi-completed-late">—</div>
+          <div class="kpi-meta" id="kpi-completed-late-sub">Past latest due_at deadline</div>
+          <div class="progress-track">
+            <div id="kpi-late-bar" class="progress-fill danger" style="width: 0%"></div>
+          </div>
+        </div>
+
+        <div class="kpi-card">
+          <div class="kpi-label">Avg Response Time</div>
+          <div class="kpi-value" id="kpi-avg-minutes">—</div>
+          <div class="kpi-meta" id="kpi-median-minutes">Business minutes (responded)</div>
+        </div>
+      </section>
+
+      <!-- Responders Summary Table -->
+      <section class="card" style="margin-bottom: 1.25rem;">
+        <div class="card-header">
+          <div>
+            <div class="card-title">
+              <span>Responders Performance Summary</span>
+              <span id="responders-count-badge" class="badge badge-neutral">0 responders</span>
+            </div>
+            <div class="card-subtitle">Click any responder row to filter the requests table below</div>
+          </div>
+          <button type="button" id="clear-responder-filter-btn" class="btn btn-ghost hidden">
+            Clear Responder Selection
+          </button>
+        </div>
+        <div class="table-wrapper">
+          <table id="responders-table" class="data-table">
+            <thead>
+              <tr>
+                <th class="sortable" data-res-sort="id">Responder ID ↕</th>
+                <th class="sortable" data-res-sort="name">Responder Name ↕</th>
+                <th class="sortable" data-res-sort="requests">Handled Requests ↕</th>
+                <th class="sortable" data-res-sort="within_target">Within Target ↕</th>
+                <th class="sortable" data-res-sort="within_rate">SLA Compliance Rate ↕</th>
+                <th class="sortable" data-res-sort="completed_late">Completed Late ↕</th>
+              </tr>
+            </thead>
+            <tbody id="responders-tbody">
+              <tr>
+                <td colspan="6" class="empty-state">
+                  <div class="empty-state-title">No responder data yet</div>
+                  <div class="empty-state-desc">Select a date range above and click "Run Report".</div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Requests Detail Table -->
+      <section class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">
+              <span>Requests SLA Breakdown</span>
+              <span id="requests-count-badge" class="badge badge-neutral">0 requests</span>
+            </div>
+            <div class="card-subtitle">Individual request SLA evaluation following rules 1–7</div>
+          </div>
+          <button type="button" id="reset-filters-btn" class="btn btn-ghost">
+            Reset Filters
+          </button>
+        </div>
+
+        <!-- Client-side Interactive Filters -->
+        <div class="filter-bar">
+          <div class="field search-field">
+            <label for="filter-search">Search ID / Responder</label>
+            <input type="search" id="filter-search" placeholder="e.g. 41210 or Benjamin...">
+          </div>
+          <div class="field">
+            <label for="filter-site">Site ID</label>
+            <select id="filter-site">
+              <option value="">All Sites</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="filter-responder">Responder</label>
+            <select id="filter-responder">
+              <option value="">All Responders</option>
+              <option value="__null__">Unresponded (null)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="filter-target">Within Target</label>
+            <select id="filter-target">
+              <option value="">All</option>
+              <option value="true">Within Target (true)</option>
+              <option value="false">Missed Target (false)</option>
+              <option value="null">No Response (null)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="filter-late">Completed Late</label>
+            <select id="filter-late">
+              <option value="">All</option>
+              <option value="true">Completed Late (true)</option>
+              <option value="false">On Time (false)</option>
+              <option value="null">Not Completed / No Due (null)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="page-size-select">Rows / Page</label>
+            <select id="page-size-select">
+              <option value="25">25 rows</option>
+              <option value="50" selected>50 rows</option>
+              <option value="100">100 rows</option>
+              <option value="500">500 rows</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="table-wrapper">
+          <table id="report" class="data-table">
+            <thead>
+              <tr>
+                <th class="sortable" data-req-sort="id">Request ID ↕</th>
+                <th class="sortable" data-req-sort="site_id">Site ID ↕</th>
+                <th class="sortable" data-req-sort="responder">Responder ↕</th>
+                <th class="sortable" data-req-sort="response_business_minutes">Response Business Time ↕</th>
+                <th class="sortable" data-req-sort="within_target">Within Target ↕</th>
+                <th class="sortable" data-req-sort="completed_late">Completed Late ↕</th>
+              </tr>
+            </thead>
+            <tbody id="requests-tbody">
+              <tr>
+                <td colspan="6" class="empty-state">
+                  <div class="empty-state-title">No requests loaded</div>
+                  <div class="empty-state-desc">Submit the date range above to fetch <code>/api/sla-report</code>.</div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="table-footer">
+          <div id="pagination-info">Showing 0 of 0 requests</div>
+          <div class="pagination-controls">
+            <button type="button" id="prev-page-btn" class="btn btn-ghost" disabled>← Previous</button>
+            <span id="page-indicator" style="font-weight: 600; padding: 0 0.5rem;">Page 1 of 1</span>
+            <button type="button" id="next-page-btn" class="btn btn-ghost" disabled>Next →</button>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ==================== TAB 2: LEVEL 4 BROWSE API (/api/requests) ==================== -->
+    <div id="browse-view" class="tab-panel hidden">
+      <section class="card" style="margin-bottom: 1.25rem;">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Browse Requests Endpoint Explorer (GET /api/requests)</div>
+            <div class="card-subtitle">Test Level 4 server-side filtering, sorting, and cursor pagination</div>
+          </div>
+        </div>
+        <div class="card-body">
+          <form id="browse-form" class="report-controls" style="align-items: flex-end;">
+            <div class="date-inputs">
+              <div class="field">
+                <label for="b-from">From</label>
+                <input type="date" id="b-from" name="from" value="2026-10-01" required>
+              </div>
+              <div class="field">
+                <label for="b-to">To</label>
+                <input type="date" id="b-to" name="to" value="2026-10-31" required>
+              </div>
+              <div class="field">
+                <label for="b-site">site_id</label>
+                <input type="number" id="b-site" name="site_id" placeholder="Any" style="width: 95px;">
+              </div>
+              <div class="field">
+                <label for="b-responder">responder_id</label>
+                <input type="number" id="b-responder" name="responder_id" placeholder="Any" style="width: 110px;">
+              </div>
+              <div class="field">
+                <label for="b-within">within_target</label>
+                <select id="b-within" name="within_target">
+                  <option value="">Any</option>
+                  <option value="true">true</option>
+                  <option value="false">false</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="b-late">late</label>
+                <select id="b-late" name="late">
+                  <option value="">Any</option>
+                  <option value="true">true</option>
+                  <option value="false">false</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="b-sort">sort</label>
+                <select id="b-sort" name="sort">
+                  <option value="id">id (asc)</option>
+                  <option value="-id">-id (desc)</option>
+                  <option value="response_business_minutes">response_business_minutes (asc)</option>
+                  <option value="-response_business_minutes">-response_business_minutes (desc)</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="b-limit">limit</label>
+                <input type="number" id="b-limit" name="limit" value="50" min="1" max="200" style="width: 80px;">
+              </div>
+              <button type="submit" id="browse-run-btn" class="btn btn-primary">
+                Fetch Page 1
+              </button>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">
+              <span>Server-Paged Results</span>
+              <span id="browse-count-badge" class="badge badge-neutral">0 rows</span>
+            </div>
+            <div class="card-subtitle" id="browse-cursor-display">next_cursor: null</div>
+          </div>
+          <div class="pagination-controls">
+            <button type="button" id="browse-reset-cursor-btn" class="btn btn-ghost" disabled>
+              ↺ First Page
+            </button>
+            <button type="button" id="browse-next-cursor-btn" class="btn btn-primary" disabled>
+              Next Cursor Page →
+            </button>
+          </div>
+        </div>
+        <div class="table-wrapper">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Request ID</th>
+                <th>Site ID</th>
+                <th>Responder</th>
+                <th>Response Business Time</th>
+                <th>Within Target</th>
+                <th>Completed Late</th>
+              </tr>
+            </thead>
+            <tbody id="browse-tbody">
+              <tr>
+                <td colspan="6" class="empty-state">
+                  <div class="empty-state-title">Query <code>GET /api/requests</code></div>
+                  <div class="empty-state-desc">Configure query parameters above and click "Fetch Page 1".</div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script src="/app.js"></script>
 </body>
 </html>
