@@ -45,4 +45,20 @@ describe("Domain: processRequestEvents", () => {
       dueAt: "02/10/2026 10:00",
     });
   });
+
+  test("uses event ID ordering when timestamps are identical", () => {
+    const result = processRequestEvents(
+      [
+        { id: 20, status: "processing", actor_id: 2, at: 10 },
+        { id: 10, status: "processing", actor_id: 1, at: 10 },
+      ],
+      [
+        { id: 1, name: "First Responder" },
+        { id: 2, name: "Second Responder" },
+      ],
+    );
+
+    assert.equal(result.responderId, 1);
+    assert.equal(result.responder, "First Responder");
+  });
 });

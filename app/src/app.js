@@ -1,10 +1,11 @@
 import express from "express";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { validateDateRange } from "./utils/dateValidation.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
-export function createApp() {
+export function createApp({ slaReportService } = {}) {
   const app = express();
 
   app.use(express.static(path.join(here, "..", "public")));
@@ -23,11 +24,23 @@ export function createApp() {
     res.status(501).json({ error: "not implemented" });
   });
 
-  app.get("/api/sla-report", (req, res) => {
-    // TODO: implement the response-time report here.
-    // Query params: from=YYYY-MM-DD, to=YYYY-MM-DD.
-    // Use the client in src/helpdesk.js to call the helpdesk API.
-    res.status(501).json({ error: "not implemented" });
+  app.get("/api/sla-report", async (req, res) => {
+    const { from, to } = req.query;
+    const validation = validateDateRange(from, to);
+    if (!validation.valid) {
+      return res.status(400).json({ error: validation.message });
+    }
+
+    if (!slaReportService || typeof slaReportService.generate !== "function") {
+      return res.status(503).json({ error: "SLA report service is unavailable" });
+    }
+
+    try {
+      const report = await slaReportService.generate(from, to);
+      res.json(report);
+    } catch (error) {
+      res.status(502).json({ error: "unable to generate SLA report" });
+    }
   });
 
   return app;

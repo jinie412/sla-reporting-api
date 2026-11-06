@@ -1,6 +1,8 @@
 export function processRequestEvents(events, staff) {
   const revertedIds = new Set();
-  for (const event of events ?? []) {
+  const orderedEvents = [...(events ?? [])].sort(compareEvents);
+
+  for (const event of orderedEvents) {
     if (event?.reverts_id !== null && event?.reverts_id !== undefined) {
       revertedIds.add(String(event.id));
       revertedIds.add(String(event.reverts_id));
@@ -18,23 +20,30 @@ export function processRequestEvents(events, staff) {
   let completedAt = null;
   let deadline = null;
 
-  for (const event of events ?? []) {
+  for (const event of orderedEvents) {
     if (!event || revertedIds.has(String(event.id))) continue;
 
     if (
       event.status === "processing" &&
       event.actor_id !== null &&
       event.actor_id !== undefined &&
-      (!firstResponse || event.at < firstResponse.at)
+      (!firstResponse || compareEvents(event, firstResponse) < 0)
     ) {
       firstResponse = event;
     }
-    if (event.status === "complete" && (completedAt === null || event.at > completedAt)) {
+    if (
+      event.status === "complete" &&
+      (completedAt === null || event.at >= completedAt)
+    ) {
       completedAt = event.at;
     }
-    if (event.due_at != null && (!deadline || event.at > deadline.at)) {
-      deadline = { at: event.at, value: event.due_at };
+    if (
+      event.due_at != null &&
+      (!deadline || compareEvents(event, deadline) >= 0)
+    ) {
+      deadline = { at: event.at, id: event.id, value: event.due_at };
     }
+
   }
 
   if (!firstResponse) {
@@ -48,4 +57,10 @@ export function processRequestEvents(events, staff) {
     completedAt,
     dueAt: deadline?.value ?? null,
   };
+}
+
+function compareEvents(left, right) {
+  const timeDifference = left.at - right.at;
+  if (timeDifference !== 0) return timeDifference;
+  return Number(left.id) - Number(right.id);
 }
