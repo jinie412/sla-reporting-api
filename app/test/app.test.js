@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createApp } from "../src/app.js";
+import { createApp, createReadinessState } from "../src/app.js";
 
-async function withServer(slaReportService, callback) {
-  const server = createApp({ slaReportService }).listen(0);
+async function withServer(slaReportService, callback, readiness) {
+  const server = createApp({ slaReportService, readiness }).listen(0);
   try {
     await new Promise((resolve) => server.once("listening", resolve));
     return await callback(`http://127.0.0.1:${server.address().port}`);
@@ -81,4 +81,26 @@ test("GET /api/sla-report returns a safe error when the service fails", async ()
       });
     },
   );
+});
+
+test("GET /ready is unavailable until initialization succeeds", async () => {
+  const readiness = createReadinessState();
+  await withServer({}, async (baseUrl) => {
+    let response = await fetch(`${baseUrl}/ready`);
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), { ready: false });
+
+    readiness.markReady();
+    response = await fetch(`${baseUrl}/ready`);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ready: true });
+  }, readiness);
+});
+
+test("GET /health remains available while readiness is pending", async () => {
+  await withServer({}, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/health`);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: true });
+  });
 });

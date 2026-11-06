@@ -5,8 +5,9 @@ import { validateDateRange } from "./utils/dateValidation.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
-export function createApp({ slaReportService } = {}) {
+export function createApp({ slaReportService, readiness } = {}) {
   const app = express();
+  const readinessState = readiness ?? createReadinessState();
 
   app.use(express.static(path.join(here, "..", "public")));
 
@@ -15,8 +16,8 @@ export function createApp({ slaReportService } = {}) {
   });
 
   app.get("/ready", (req, res) => {
-    // TODO: answer 200 {"ready": true} once your app can serve six-month reports (level 2).
-    res.status(503).json({ ready: false });
+    const ready = readinessState.isReady();
+    res.status(ready ? 200 : 503).json({ ready });
   });
 
   app.get("/api/requests", (req, res) => {
@@ -44,4 +45,17 @@ export function createApp({ slaReportService } = {}) {
   });
 
   return app;
+}
+
+export function createReadinessState() {
+  let ready = false;
+  return {
+    isReady: () => ready,
+    markReady: () => {
+      ready = true;
+    },
+    markNotReady: () => {
+      ready = false;
+    },
+  };
 }

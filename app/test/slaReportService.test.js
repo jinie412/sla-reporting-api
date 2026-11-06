@@ -38,6 +38,57 @@ function request(id, siteId = 1, overrides = {}) {
 }
 
 describe("SlaReportService", () => {
+  test("reuses one snapshot for sequential and concurrent reports", async () => {
+    let ingestionCalls = 0;
+    let resolveIngestion;
+    const ingestion = {
+      requests: [],
+      eventsByRequestId: {},
+      sites: [],
+      staff: [],
+      holidaysBySiteId: {},
+    };
+    const service = new SlaReportService({
+      ingest: async () => {
+        ingestionCalls += 1;
+        await new Promise((resolve) => {
+          resolveIngestion = resolve;
+        });
+        return ingestion;
+      },
+    });
+
+    const first = service.generate("2026-10-01", "2026-10-31");
+    const second = service.generate("2026-05-01", "2026-10-31");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(ingestionCalls, 1);
+    resolveIngestion();
+
+    await Promise.all([first, second]);
+    await service.generate("2026-10-01", "2026-10-31");
+    assert.equal(ingestionCalls, 1);
+  });
+
+  test("failed initialization does not mark the snapshot as ready", async () => {
+    let ingestionCalls = 0;
+    const service = new SlaReportService({
+      ingest: async () => {
+        ingestionCalls += 1;
+        throw new Error("temporary upstream failure");
+      },
+    });
+
+    await assert.rejects(
+      service.initialize("2026-05-01", "2026-10-31"),
+      /temporary upstream failure/,
+    );
+    await assert.rejects(
+      service.generate("2026-10-01", "2026-10-31"),
+      /temporary upstream failure/,
+    );
+    assert.equal(ingestionCalls, 2);
+  });
+
   test("creates rows from the correct request events and aggregates current responders", async () => {
     const report = await new SlaReportService(
       dataService({

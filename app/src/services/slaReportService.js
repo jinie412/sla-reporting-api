@@ -7,69 +7,58 @@ export class SlaReportService {
       throw new TypeError("dataService must provide an ingest method");
     }
     this.dataService = dataService;
+    this.snapshot = null;
+    this.snapshotPromise = null;
+    this.preparedRows = null;
   }
 
   async generate(from, to) {
-    const ingestion = await this.dataService.ingest();
-    validateIngestionResult(ingestion);
-    const {
-      requests,
-      eventsByRequestId,
-      sites,
-      staff,
-      holidaysBySiteId,
-    } = ingestion;
+    return this.#generateFromSnapshot(
+      from,
+      to,
+      await this.#getSnapshot(),
+    );
+  }
 
-    const sitesById = new Map(
-      sites.map((site) => [String(site.id), site]),
-    );
-    const staffById = new Map(
-      staff.map((member) => [String(member.id), member]),
-    );
+  async initialize(from, to) {
+    const snapshot = await this.#getSnapshot();
+    await this.#generateFromSnapshot(from, to, snapshot);
+    return true;
+  }
+
+  async #getSnapshot() {
+    if (this.snapshot) return this.snapshot;
+    if (this.snapshotPromise) return this.snapshotPromise;
+
+    this.snapshotPromise = this.dataService
+      .ingest()
+      .then((ingestion) => {
+        validateIngestionResult(ingestion);
+        const preparedRows = prepareRows(ingestion);
+        this.snapshot = ingestion;
+        this.preparedRows = preparedRows;
+        return ingestion;
+      })
+      .catch((error) => {
+        this.snapshotPromise = null;
+        throw error;
+      });
+
+    return this.snapshotPromise;
+  }
+
+  async #generateFromSnapshot(from, to, ingestion) {
+    validateIngestionResult(ingestion);
     const reportRequests = [];
 
-    for (const request of requests) {
-      const site = sitesById.get(String(request.site_id));
-      if (!site) {
-        throw new Error(
-          `Data integrity error: request ${request.id} references missing site ${request.site_id}`,
-        );
-      }
-
-      if (!isEligibleRequest(request, site, from, to)) continue;
-
-      const requestKey = String(request.id);
-      const siteKey = String(site.id);
-      const events = eventsByRequestId[requestKey] ?? [];
-      if (!Array.isArray(events)) {
-        throw new Error(
-          `Invalid ingestion result: events for request ${request.id} must be an array`,
-        );
-      }
-      if (!Object.prototype.hasOwnProperty.call(holidaysBySiteId, siteKey)) {
-        throw new Error(
-          `Invalid ingestion result: holidays for site ${site.id} are missing`,
-        );
-      }
-      const holidays = holidaysBySiteId[siteKey];
-      if (!Array.isArray(holidays)) {
-        throw new Error(
-          `Invalid ingestion result: holidays for site ${site.id} must be an array`,
-        );
-      }
-      const row = calculateSla(request, events, site, holidays, staff);
-
-      validateSlaRow(row, request.id);
-      if (row.responder_id !== null) {
-        const responder = staffById.get(String(row.responder_id));
-        if (!responder || typeof responder.name !== "string") {
-          throw new Error(
-            `Data integrity error: responder ${row.responder_id} for request ${request.id} is missing from staff`,
-          );
+    for (const prepared of this.preparedRows) {
+      const { request, site } = prepared;
+      if (isEligibleRequest(request, site, from, to)) {
+        if (!prepared.row) {
+          prepared.row = calculatePreparedRow(prepared);
         }
-        row.responder = responder.name;
+        reportRequests.push({ ...prepared.row });
       }
-      reportRequests.push(row);
     }
 
     return {
@@ -79,6 +68,78 @@ export class SlaReportService {
       responders: aggregateResponders(reportRequests),
     };
   }
+
+}
+
+function prepareRows(ingestion) {
+    const {
+      requests,
+      eventsByRequestId,
+      sites,
+      staff,
+      holidaysBySiteId,
+    } = ingestion;
+    const sitesById = new Map(sites.map((site) => [String(site.id), site]));
+    const staffById = new Map(staff.map((member) => [String(member.id), member]));
+    const preparedRows = [];
+
+    for (const request of requests) {
+      const site = sitesById.get(String(request.site_id));
+      if (!site) {
+        throw new Error(
+          `Data integrity error: request ${request.id} references missing site ${request.site_id}`,
+        );
+      }
+
+      preparedRows.push({
+        request,
+        site,
+        eventsByRequestId,
+        holidaysBySiteId,
+        staff,
+        staffById,
+        row: null,
+      });
+    }
+
+    return preparedRows;
+}
+
+function calculatePreparedRow(prepared) {
+    const { request, site, eventsByRequestId, holidaysBySiteId, staff, staffById } =
+      prepared;
+    const requestKey = String(request.id);
+    const siteKey = String(site.id);
+    const events = eventsByRequestId[requestKey] ?? [];
+    if (!Array.isArray(events)) {
+      throw new Error(
+        `Invalid ingestion result: events for request ${request.id} must be an array`,
+      );
+    }
+    if (!Object.prototype.hasOwnProperty.call(holidaysBySiteId, siteKey)) {
+      throw new Error(
+        `Invalid ingestion result: holidays for site ${site.id} are missing`,
+      );
+    }
+    const holidays = holidaysBySiteId[siteKey];
+    if (!Array.isArray(holidays)) {
+      throw new Error(
+        `Invalid ingestion result: holidays for site ${site.id} must be an array`,
+      );
+    }
+    const row = calculateSla(request, events, site, holidays, staff);
+
+    validateSlaRow(row, request.id);
+    if (row.responder_id !== null) {
+      const responder = staffById.get(String(row.responder_id));
+      if (!responder || typeof responder.name !== "string") {
+        throw new Error(
+          `Data integrity error: responder ${row.responder_id} for request ${request.id} is missing from staff`,
+        );
+      }
+      row.responder = responder.name;
+    }
+    return row;
 }
 
 function validateIngestionResult(ingestion) {
