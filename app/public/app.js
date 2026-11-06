@@ -125,7 +125,8 @@
         els.readyText.textContent = "Ready: true (200)";
       } else {
         els.readyPill.className = "status-pill warn";
-        els.readyText.textContent = `Ready: false (${rRes.status})`;
+        els.readyText.textContent = `Ready: Warming up (${rRes.status})`;
+        setTimeout(checkSystemStatus, 3000);
       }
     } catch {
       els.readyPill.className = "status-pill err";
